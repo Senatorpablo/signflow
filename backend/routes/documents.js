@@ -62,6 +62,12 @@ router.post('/', authenticate, upload.single('file'), catchAsync(async (req, res
     throw new ApiError(400, 'No file uploaded');
   }
 
+  // Verify user exists
+  const user = await prisma.user.findUnique({ where: { id: req.userId } });
+  if (!user) {
+    throw new ApiError(401, 'User not found');
+  }
+
   const doc = await prisma.document.create({
     data: {
       title: req.body.title || req.file.originalname,
@@ -81,6 +87,7 @@ router.post('/', authenticate, upload.single('file'), catchAsync(async (req, res
 // List documents
 router.get('/', authenticate, catchAsync(async (req, res) => {
   const docs = await prisma.document.findMany({
+    where: { ownerId: req.userId },
     orderBy: { createdAt: 'desc' },
     include: {
       fields: true,
@@ -92,8 +99,8 @@ router.get('/', authenticate, catchAsync(async (req, res) => {
 
 // Get document by ID
 router.get('/:id', authenticate, catchAsync(async (req, res) => {
-  const doc = await prisma.document.findUnique({
-    where: { id: req.params.id },
+  const doc = await prisma.document.findFirst({
+    where: { id: req.params.id, ownerId: req.userId },
     include: { fields: true, signatures: true },
   });
 
@@ -107,6 +114,14 @@ router.get('/:id', authenticate, catchAsync(async (req, res) => {
 // Update document fields
 router.patch('/:id/fields', authenticate, catchAsync(async (req, res) => {
   const { fields } = req.body;
+
+  // Verify ownership
+  const existing = await prisma.document.findFirst({
+    where: { id: req.params.id, ownerId: req.userId },
+  });
+  if (!existing) {
+    throw new ApiError(404, 'Document not found');
+  }
 
   await prisma.field.deleteMany({
     where: { documentId: req.params.id },
@@ -139,6 +154,14 @@ router.patch('/:id/fields', authenticate, catchAsync(async (req, res) => {
 router.post('/:id/send', authenticate, catchAsync(async (req, res) => {
   const { signers, message } = req.body;
 
+  // Verify ownership
+  const existing = await prisma.document.findFirst({
+    where: { id: req.params.id, ownerId: req.userId },
+  });
+  if (!existing) {
+    throw new ApiError(404, 'Document not found');
+  }
+
   const doc = await prisma.document.update({
     where: { id: req.params.id },
     data: {
@@ -153,8 +176,8 @@ router.post('/:id/send', authenticate, catchAsync(async (req, res) => {
 
 // Delete document
 router.delete('/:id', authenticate, catchAsync(async (req, res) => {
-  const doc = await prisma.document.findUnique({
-    where: { id: req.params.id },
+  const doc = await prisma.document.findFirst({
+    where: { id: req.params.id, ownerId: req.userId },
   });
 
   if (!doc) {
