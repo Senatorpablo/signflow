@@ -52,9 +52,12 @@ router.post('/register', catchAsync(async (req, res) => {
   const token = generateToken(user.id);
 
   // Send welcome email (queued)
-  emailQueue.addEmailJob('welcome', { to: user.email, name: user.name }).catch(() => {
-    // Non-blocking — don't fail registration if email fails
-  });
+// Don't queue welcome email in test environment to avoid Redis dependency
+  if (process.env.NODE_ENV !== 'test') {
+    emailQueue.addEmailJob('welcome', { to: user.email, name: user.name }).catch(() => {
+      // Non-blocking — don't fail registration if email fails
+    });
+  }
 
   res.status(201).json({
     user,
