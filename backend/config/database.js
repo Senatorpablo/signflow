@@ -14,13 +14,13 @@ const createPrismaClient = () => {
   const client = new PrismaClient({
     log: isDev
       ? [
-          { emit: 'event', level: 'query' },
-          { emit: 'stdout', level: 'error' },
-          { emit: 'stdout', level: 'warn' },
-        ]
+        { emit: 'event', level: 'query' },
+        { emit: 'stdout', level: 'error' },
+        { emit: 'stdout', level: 'warn' },
+      ]
       : [
-          { emit: 'stdout', level: 'error' },
-        ],
+        { emit: 'stdout', level: 'error' },
+      ],
   });
 
   // Log slow queries in development
