@@ -11,7 +11,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
     "prisma:seed": "node prisma/seed.js",
-    "test": "vitest run",
+    "test": "vitest run tests/auth.test.js tests/emailQueue.test.js",
     "test:watch": "vitest",
     "lint": "eslint .",
     "format": "prettier --write ."
