@@ -1,6 +1,6 @@
 /**
  * SignFlow Database Configuration
- * PostgreSQL connection using Prisma ORM
+ * PostgreSQL connection using Prisma ORM with pooling & graceful shutdown
  */
 
 import { PrismaClient } from '@prisma/client';

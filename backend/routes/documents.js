@@ -1,5 +1,5 @@
 /**
- * Document Routes
+ * Document Routes with Authentication
  * Upload, manage, and send documents for signing
  */
 
@@ -7,6 +7,8 @@ import { Router } from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import { prisma } from '../config/database.js';
+import { ApiError, catchAsync } from '../middleware/errorHandler.js';
 
 const router = Router();
 
@@ -25,9 +27,9 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ 
+const upload = multer({
   storage,
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
+  limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'application/pdf') {
       cb(null, true);
@@ -37,94 +39,137 @@ const upload = multer({
   }
 });
 
-// In-memory store for testing
-const documents = [];
+// Simple auth middleware
+const authenticate = async (req, res, next) => {
+  try {
+    const auth = req.headers.authorization;
+    if (!auth || !auth.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    const token = auth.slice(7);
+    const jwt = await import('jsonwebtoken');
+    const decoded = jwt.default.verify(token, process.env.JWT_SECRET || 'test-secret');
+    req.userId = decoded.userId;
+    next();
+  } catch (error) {
+    res.status(401).json({ error: 'Authentication required' });
+  }
+};
 
 // Create document (upload)
-router.post('/', upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
+router.post('/', authenticate, upload.single('file'), catchAsync(async (req, res) => {
+  if (!req.file) {
+    throw new ApiError(400, 'No file uploaded');
+  }
 
-    const document = {
-      id: crypto.randomUUID(),
+  const doc = await prisma.document.create({
+    data: {
       title: req.body.title || req.file.originalname,
       fileName: req.file.filename,
-      originalName: req.file.originalname,
       fileSize: req.file.size,
+      fileType: 'application/pdf',
+      storageKey: req.file.filename,
       status: 'DRAFT',
-      fields: [],
-      signatures: [],
       recipients: [],
-      createdAt: new Date(),
-    };
+      ownerId: req.userId,
+    },
+  });
 
-    documents.push(document);
-
-    res.status(201).json(document);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+  res.status(201).json(doc);
+}));
 
 // List documents
-router.get('/', (req, res) => {
-  res.json(documents);
-});
+router.get('/', authenticate, catchAsync(async (req, res) => {
+  const docs = await prisma.document.findMany({
+    orderBy: { createdAt: 'desc' },
+    include: {
+      fields: true,
+      signatures: true,
+    },
+  });
+  res.json(docs);
+}));
 
 // Get document by ID
-router.get('/:id', (req, res) => {
-  const document = documents.find(d => d.id === req.params.id);
-  if (!document) {
-    return res.status(404).json({ error: 'Document not found' });
+router.get('/:id', authenticate, catchAsync(async (req, res) => {
+  const doc = await prisma.document.findUnique({
+    where: { id: req.params.id },
+    include: { fields: true, signatures: true },
+  });
+
+  if (!doc) {
+    throw new ApiError(404, 'Document not found');
   }
-  res.json(document);
-});
+
+  res.json(doc);
+}));
 
 // Update document fields
-router.patch('/:id/fields', (req, res) => {
-  const document = documents.find(d => d.id === req.params.id);
-  if (!document) {
-    return res.status(404).json({ error: 'Document not found' });
-  }
+router.patch('/:id/fields', authenticate, catchAsync(async (req, res) => {
+  const { fields } = req.body;
 
-  document.fields = req.body.fields || [];
-  res.json(document);
-});
+  await prisma.field.deleteMany({
+    where: { documentId: req.params.id },
+  });
+
+  const doc = await prisma.document.update({
+    where: { id: req.params.id },
+    data: {
+      fields: {
+        create: fields.map(f => ({
+          type: f.type,
+          label: f.label,
+          page: f.page || 1,
+          x: f.x,
+          y: f.y,
+          width: f.width || 150,
+          height: f.height || 30,
+          required: f.required ?? true,
+          order: f.order || 0,
+        })),
+      },
+    },
+    include: { fields: true },
+  });
+
+  res.json(doc);
+}));
 
 // Send document
-router.post('/:id/send', (req, res) => {
-  const document = documents.find(d => d.id === req.params.id);
-  if (!document) {
-    return res.status(404).json({ error: 'Document not found' });
-  }
+router.post('/:id/send', authenticate, catchAsync(async (req, res) => {
+  const { signers, message } = req.body;
 
-  document.recipients = req.body.signers || [];
-  document.status = 'SENT';
-  document.sentAt = new Date();
+  const doc = await prisma.document.update({
+    where: { id: req.params.id },
+    data: {
+      status: 'SENT',
+      recipients: signers || [],
+      emailMessage: message,
+    },
+  });
 
-  res.json(document);
-});
+  res.json(doc);
+}));
 
 // Delete document
-router.delete('/:id', (req, res) => {
-  const index = documents.findIndex(d => d.id === req.params.id);
-  if (index === -1) {
-    return res.status(404).json({ error: 'Document not found' });
+router.delete('/:id', authenticate, catchAsync(async (req, res) => {
+  const doc = await prisma.document.findUnique({
+    where: { id: req.params.id },
+  });
+
+  if (!doc) {
+    throw new ApiError(404, 'Document not found');
   }
 
-  const document = documents[index];
-  
-  // Delete file
   try {
-    fs.unlinkSync(`./uploads/${document.fileName}`);
-  } catch (e) {
-    // File might not exist
-  }
+    fs.unlinkSync(`./uploads/${doc.storageKey}`);
+  } catch (e) {}
 
-  documents.splice(index, 1);
+  await prisma.document.delete({
+    where: { id: req.params.id },
+  });
+
   res.json({ success: true });
-});
+}));
 
 export default router;

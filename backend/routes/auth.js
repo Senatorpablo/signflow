@@ -1,108 +1,126 @@
 /**
- * Simplified Authentication Routes
- * Registration, login, token generation
+ * SignFlow Authentication Routes
+ * Registration, login, token generation using Prisma
  */
 
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { prisma } from '../config/database.js';
+import { ApiError, catchAsync } from '../middleware/errorHandler.js';
+import emailQueue from '../services/emailQueue.js';
 
 const router = Router();
-
-// Simple in-memory store for testing (replace with Prisma in production)
-const users = [];
 const JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1h';
 
 function generateToken(userId) {
-  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '1h' });
+  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 }
 
 // Register
-router.post('/register', async (req, res) => {
-  try {
-    const { email, password, name } = req.body;
-    
-    if (!email || !password || !name) {
-      return res.status(400).json({ error: 'Email, password, and name required' });
-    }
+router.post('/register', catchAsync(async (req, res) => {
+  const { email, password, name } = req.body;
 
-    if (users.find(u => u.email === email)) {
-      return res.status(409).json({ error: 'Email already registered' });
-    }
+  if (!email || !password || !name) {
+    throw new ApiError(400, 'Email, password, and name required', null, 'MISSING_FIELDS');
+  }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const user = {
-      id: crypto.randomUUID(),
+  const existing = await prisma.user.findUnique({ where: { email } });
+  if (existing) {
+    throw new ApiError(409, 'Email already registered', null, 'DUPLICATE_EMAIL');
+  }
+
+  const hashedPassword = await bcrypt.hash(password, 10);
+  const user = await prisma.user.create({
+    data: {
       email,
       password: hashedPassword,
       name,
       role: 'USER',
-      createdAt: new Date(),
-    };
+      status: 'ACTIVE',
+    },
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      role: true,
+      createdAt: true,
+    },
+  });
 
-    users.push(user);
-    const token = generateToken(user.id);
+  const token = generateToken(user.id);
 
-    res.status(201).json({
-      user: { id: user.id, email: user.email, name: user.name },
-      token,
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+  // Send welcome email (queued)
+  emailQueue.addEmailJob('welcome', { to: user.email, name: user.name }).catch(() => {
+    // Non-blocking — don't fail registration if email fails
+  });
+
+  res.status(201).json({
+    user,
+    token,
+  });
+}));
 
 // Login
-router.post('/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
+router.post('/login', catchAsync(async (req, res) => {
+  const { email, password } = req.body;
 
-    const user = users.find(u => u.email === email);
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    const valid = await bcrypt.compare(password, user.password);
-    if (!valid) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    const token = generateToken(user.id);
-
-    res.json({
-      user: { id: user.id, email: user.email, name: user.name },
-      token,
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+  if (!email || !password) {
+    throw new ApiError(400, 'Email and password required', null, 'MISSING_FIELDS');
   }
-});
 
-// Get me
-router.get('/me', async (req, res) => {
-  try {
-    const auth = req.headers.authorization;
-    if (!auth || !auth.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+  const user = await prisma.user.findUnique({ where: { email } });
+  if (!user || !user.password) {
+    throw new ApiError(401, 'Invalid credentials', null, 'INVALID_CREDENTIALS');
+  }
 
-    const token = auth.split(' ')[1];
-    const decoded = jwt.verify(token, JWT_SECRET);
-    const user = users.find(u => u.id === decoded.userId);
+  const valid = await bcrypt.compare(password, user.password);
+  if (!valid) {
+    throw new ApiError(401, 'Invalid credentials', null, 'INVALID_CREDENTIALS');
+  }
 
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+  const token = generateToken(user.id);
 
-    res.json({
+  res.json({
+    user: {
       id: user.id,
       email: user.email,
       name: user.name,
       role: user.role,
-    });
-  } catch (error) {
-    res.status(401).json({ error: 'Invalid token' });
+    },
+    token,
+  });
+}));
+
+// Get me
+router.get('/me', catchAsync(async (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) {
+    throw new ApiError(401, 'Unauthorized', null, 'UNAUTHORIZED');
   }
-});
+
+  const token = auth.split(' ')[1];
+  const decoded = jwt.verify(token, JWT_SECRET);
+  const user = await prisma.user.findUnique({
+    where: { id: decoded.userId },
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      role: true,
+      avatar: true,
+      status: true,
+      emailVerified: true,
+      createdAt: true,
+    },
+  });
+
+  if (!user) {
+    throw new ApiError(404, 'User not found', null, 'USER_NOT_FOUND');
+  }
+
+  res.json(user);
+}));
 
 export default router;
