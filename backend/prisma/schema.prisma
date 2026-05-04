@@ -1,0 +1,666 @@
+// ==========================================
+// SignFlow Database Schema
+// Self-hosted e-signature platform
+// ==========================================
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================
+// CORE TABLES
+// ==========================================
+
+enum UserRole {
+  ADMIN
+  USER
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  PENDING_VERIFICATION
+}
+
+enum SubscriptionTier {
+  FREE
+  PRO
+  BUSINESS
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  UNPAID
+  TRIALING
+  EXPIRED
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String?  // null for OAuth users
+  name      String?
+  avatar    String?
+  role      UserRole @default(USER)
+  status    UserStatus @default(ACTIVE)
+  
+  // OAuth profiles
+  googleId    String? @unique
+  githubId    String? @unique
+  
+  // Email verification
+  emailVerified Boolean @default(false)
+  verificationToken String?
+  
+  // Password reset
+  resetToken String?
+  resetTokenExpires DateTime?
+  
+  // Relations
+  ownedOrganizations Organization[] @relation("OrganizationOwner")
+  memberships        OrganizationMember[]
+  documents          Document[] @relation("DocumentOwner")
+  signatures         Signature[]
+  templates          Template[] @relation("TemplateOwner")
+  auditLogs          AuditLog[]
+  apiKeys            ApiKey[]
+  webhooks           Webhook[]
+  subscriptions      Subscription[]
+  
+  // Preferences
+  timezone   String @default("UTC")
+  locale     String @default("en")
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@index([email])
+  @@index([googleId])
+  @@index([githubId])
+}
+
+// ==========================================
+// ORGANIZATIONS (Multi-tenancy)
+// ==========================================
+
+model Organization {
+  id          String @id @default(uuid())
+  name        String
+  slug        String @unique
+  description String?
+  logo        String?
+  
+  ownerId     String
+  owner       User   @relation("OrganizationOwner", fields: [ownerId], references: [id])
+  
+  members     OrganizationMember[]
+  documents   Document[]
+  templates   Template[]
+  
+  // Billing
+  subscription Subscription?
+  
+  settings    Json?  @default("{}")
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([slug])
+  @@index([ownerId])
+}
+
+model OrganizationMember {
+  id              String @id @default(uuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  userId          String
+  user            User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  role            OrgRole @default(MEMBER)
+  
+  joinedAt        DateTime @default(now())
+  
+  @@unique([organizationId, userId])
+  @@index([organizationId])
+  @@index([userId])
+}
+
+enum OrgRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+// ==========================================
+// SUBSCRIPTIONS & BILLING
+// ==========================================
+
+model Subscription {
+  id              String @id @default(uuid())
+  
+  organizationId  String @unique
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  userId          String?
+  user            User? @relation(fields: [userId], references: [id])
+  
+  tier            SubscriptionTier @default(FREE)
+  status          SubscriptionStatus @default(ACTIVE)
+  
+  // Stripe integration
+  stripeCustomerId     String?
+  stripeSubscriptionId   String?
+  stripePriceId        String?
+  
+  // Plan limits
+  documentsPerMonth    Int @default(3)   // Free: 3, Pro: unlimited, etc.
+  signersPerDocument   Int @default(3)   // Free: 3, Pro: unlimited
+  templatesLimit       Int @default(1)   // Free: 1, Pro: unlimited
+  apiAccess            Boolean @default(false)
+  customBranding       Boolean @default(false)
+  webhooksEnabled      Boolean @default(false)
+  
+  // Billing cycle
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  cancelAtPeriodEnd  Boolean @default(false)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@index([stripeCustomerId])
+  @@index([stripeSubscriptionId])
+}
+
+// ==========================================
+// DOCUMENTS
+// ==========================================
+
+enum DocumentStatus {
+  DRAFT
+  PENDING
+  SENT
+  PARTIALLY_SIGNED
+  COMPLETED
+  VOIDED
+  EXPIRED
+  DECLINED
+}
+
+model Document {
+  id              String @id @default(uuid())
+  title           String
+  description     String?
+  fileName        String
+  fileSize        Int
+  fileType        String @default("application/pdf")
+  
+  // Storage
+  storageType     String @default("local") // local, s3, minio
+  storageKey      String // path or key in storage
+  
+  // Status
+  status          DocumentStatus @default(DRAFT)
+  
+  // Relations
+  ownerId         String
+  owner           User @relation("DocumentOwner", fields: [ownerId], references: [id])
+  
+  organizationId  String?
+  organization    Organization? @relation(fields: [organizationId], references: [id])
+  
+  // Signing
+  fields          Field[]
+  signatures      Signature[]
+  
+  // Template source
+  templateId      String?
+  template        Template? @relation(fields: [templateId], references: [id])
+  
+  // Recipients (stored as JSON for flexibility)
+  recipients      Json // [{ email, name, role, status, order }]
+  
+  // Settings
+  signingOrder    Boolean @default(false) // sequential vs parallel
+  requireAllSignatures Boolean @default(true)
+  emailSubject    String?
+  emailMessage    String?
+  
+  // Expiration
+  expiresAt       DateTime?
+  
+  // Completion
+  completedAt     DateTime?
+  completedById   String?
+  
+  // Metadata
+  ipAddress       String?
+  userAgent       String?
+  
+  // Audit
+  auditLogs       AuditLog[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([ownerId])
+  @@index([organizationId])
+  @@index([status])
+  @@index([templateId])
+  @@index([createdAt])
+}
+
+// ==========================================
+// TEMPLATES
+// ==========================================
+
+model Template {
+  id              String @id @default(uuid())
+  name            String
+  description     String?
+  category        String?
+  
+  // Source document
+  fileName        String
+  storageType     String @default("local")
+  storageKey      String
+  
+  // Fields configuration (pre-placed fields)
+  fields          Field[]
+  
+  // Owner
+  ownerId         String
+  owner           User @relation("TemplateOwner", fields: [ownerId], references: [id])
+  
+  organizationId  String?
+  organization    Organization? @relation(fields: [organizationId], references: [id])
+  
+  // Usage
+  documents       Document[]
+  usageCount      Int @default(0)
+  
+  // Public templates marketplace
+  isPublic        Boolean @default(false)
+  isOfficial      Boolean @default(false)
+  
+  // Settings
+  settings        Json? @default("{}")
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([ownerId])
+  @@index([organizationId])
+  @@index([isPublic])
+  @@index([category])
+}
+
+// ==========================================
+// FIELDS (Signature/Form fields on documents)
+// ==========================================
+
+enum FieldType {
+  SIGNATURE
+  INITIALS
+  DATE
+  TEXT
+  CHECKBOX
+  RADIO
+  DROPDOWN
+  EMAIL
+  NAME
+  COMPANY
+  TITLE
+  STAMP
+  ATTACHMENT
+}
+
+enum FieldStatus {
+  EMPTY
+  FILLED
+  OPTIONAL
+}
+
+model Field {
+  id              String @id @default(uuid())
+  
+  // Field type
+  type            FieldType
+  label           String?
+  placeholder     String?
+  
+  // Position on PDF (percentage-based for responsiveness)
+  page            Int @default(1)
+  x               Float
+  y               Float
+  width           Float @default(150)
+  height          Float @default(30)
+  
+  // Value
+  value           String?
+  defaultValue    String?
+  
+  // Options for select fields
+  options         Json? // [{ label, value }]
+  
+  // Validation
+  required        Boolean @default(true)
+  readOnly        Boolean @default(false)
+  
+  // Assignment
+  assignedTo      String? // email of recipient
+  signerId        String? // if linked to specific signer
+  
+  // Relations
+  documentId      String?
+  document        Document? @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  
+  templateId      String?
+  template        Template? @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  
+  // Signature (if this field has been signed)
+  signature       Signature?
+  
+  // Order
+  order           Int @default(0)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([documentId])
+  @@index([templateId])
+  @@index([type])
+}
+
+// ==========================================
+// SIGNATURES
+// ==========================================
+
+enum SignatureType {
+  DRAWN
+  TYPED
+  UPLOADED
+  DIGITAL
+}
+
+model Signature {
+  id              String @id @default(uuid())
+  
+  // The field that was signed
+  fieldId         String @unique
+  field           Field @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+  
+  // The document
+  documentId      String
+  document        Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  
+  // The signer
+  signerId        String?
+  signer          User? @relation(fields: [signerId], references: [id])
+  
+  // Signer details (for non-registered users)
+  signerEmail     String
+  signerName      String?
+  signerIp        String?
+  signerUserAgent String?
+  
+  // Signature data
+  type            SignatureType
+  signatureData   String // base64 or path to image
+  
+  // Timestamp
+  signedAt        DateTime @default(now())
+  
+  // Verification
+  verified        Boolean @default(false)
+  verificationMethod String?
+  
+  // Audit
+  auditLogs       AuditLog[]
+  
+  @@index([documentId])
+  @@index([signerId])
+  @@index([signerEmail])
+  @@index([signedAt])
+}
+
+// ==========================================
+// AUDIT LOGS (Immutable)
+// ==========================================
+
+enum AuditAction {
+  DOCUMENT_CREATED
+  DOCUMENT_UPLOADED
+  DOCUMENT_SENT
+  DOCUMENT_VIEWED
+  DOCUMENT_SIGNED
+  DOCUMENT_COMPLETED
+  DOCUMENT_VOIDED
+  DOCUMENT_DECLINED
+  DOCUMENT_EXPIRED
+  DOCUMENT_DELETED
+  
+  FIELD_CREATED
+  FIELD_UPDATED
+  FIELD_DELETED
+  
+  SIGNATURE_CREATED
+  SIGNATURE_DELETED
+  
+  USER_REGISTERED
+  USER_LOGGED_IN
+  USER_LOGGED_OUT
+  USER_UPDATED
+  USER_DELETED
+  
+  TEMPLATE_CREATED
+  TEMPLATE_UPDATED
+  TEMPLATE_DELETED
+  TEMPLATE_USED
+  
+  WEBHOOK_SENT
+  WEBHOOK_FAILED
+  WEBHOOK_RETRIED
+  
+  SUBSCRIPTION_CREATED
+  SUBSCRIPTION_UPDATED
+  SUBSCRIPTION_CANCELED
+  
+  ORGANIZATION_CREATED
+  ORGANIZATION_UPDATED
+  ORGANIZATION_DELETED
+  ORGANIZATION_MEMBER_ADDED
+  ORGANIZATION_MEMBER_REMOVED
+  ORGANIZATION_MEMBER_UPDATED
+  
+  API_KEY_CREATED
+  API_KEY_REVOKED
+  API_KEY_USED
+  
+  SETTINGS_UPDATED
+  EMAIL_SENT
+  EMAIL_FAILED
+}
+
+model AuditLog {
+  id          String @id @default(uuid())
+  
+  action      AuditAction
+  
+  // Actor
+  userId      String?
+  user        User? @relation(fields: [userId], references: [id])
+  
+  // Target resources
+  documentId  String?
+  document    Document? @relation(fields: [documentId], references: [id])
+  
+  signatureId String?
+  signature   Signature? @relation(fields: [signatureId], references: [id])
+  
+  // Details
+  metadata    Json? // additional context
+  ipAddress   String?
+  userAgent   String?
+  
+  // Request info
+  requestId   String?
+  requestPath String?
+  requestMethod String?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([userId])
+  @@index([documentId])
+  @@index([action])
+  @@index([createdAt])
+  @@index([ipAddress])
+}
+
+// ==========================================
+// WEBHOOKS
+// ==========================================
+
+enum WebhookStatus {
+  ACTIVE
+  INACTIVE
+  FAILED
+}
+
+model Webhook {
+  id          String @id @default(uuid())
+  
+  ownerId     String
+  owner       User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  
+  organizationId String?
+  
+  name        String
+  url         String
+  secret      String // for HMAC signature
+  
+  // Events to subscribe to (comma-separated or JSON array)
+  events      Json // ["DOCUMENT_SIGNED", "DOCUMENT_COMPLETED"]
+  
+  status      WebhookStatus @default(ACTIVE)
+  
+  // Delivery stats
+  lastDeliveredAt DateTime?
+  lastFailureAt   DateTime?
+  failureCount    Int @default(0)
+  
+  // Retry configuration
+  maxRetries  Int @default(5)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([ownerId])
+  @@index([organizationId])
+  @@index([status])
+}
+
+// ==========================================
+// API KEYS
+// ==========================================
+
+model ApiKey {
+  id          String @id @default(uuid())
+  
+  name        String
+  keyHash     String @unique // hashed key for verification
+  keyPrefix   String // first 8 chars for display
+  
+  ownerId     String
+  owner       User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  
+  organizationId String?
+  
+  // Scopes
+  scopes      Json @default("[\"read:documents\",\"write:documents\"]")
+  
+  // Usage
+  lastUsedAt  DateTime?
+  useCount    Int @default(0)
+  
+  // Expiration
+  expiresAt   DateTime?
+  
+  // Status
+  revoked     Boolean @default(false)
+  revokedAt   DateTime?
+  revokedReason String?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([ownerId])
+  @@index([organizationId])
+  @@index([keyHash])
+  @@index([revoked])
+}
+
+// ==========================================
+// WEBHOOK DELIVERY LOGS
+// ==========================================
+
+model WebhookDelivery {
+  id          String @id @default(uuid())
+  
+  webhookId   String
+  event       String
+  payload     Json
+  
+  // Delivery details
+  responseStatus  Int?
+  responseBody    String? @db.Text
+  error           String?
+  
+  // Timing
+  attemptedAt DateTime @default(now())
+  durationMs  Int?
+  
+  // Retry info
+  attemptNumber Int @default(1)
+  maxAttempts   Int @default(5)
+  
+  // Status
+  success     Boolean
+  willRetry   Boolean @default(false)
+  
+  @@index([webhookId])
+  @@index([event])
+  @@index([success])
+  @@index([attemptedAt])
+}
+
+// ==========================================
+// DOCUMENT VIEW LOGS
+// ==========================================
+
+model DocumentView {
+  id          String @id @default(uuid())
+  
+  documentId  String
+  
+  viewerEmail String?
+  viewerIp    String?
+  userAgent   String?
+  
+  viewedAt    DateTime @default(now())
+  
+  @@index([documentId])
+  @@index([viewedAt])
+}

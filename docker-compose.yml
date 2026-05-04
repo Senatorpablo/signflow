@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  app:
+    build: ./backend
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://signflow:signflow_password@db:5432/signflow
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET:-change-this-in-production}
+      - STORAGE_TYPE=local
+      - FRONTEND_URL=http://localhost:5173
+    volumes:
+      - ./uploads:/app/uploads
+    depends_on:
+      - db
+      - redis
+    restart: unless-stopped
+
+  db:
+    image: postgres:15-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=signflow
+      - POSTGRES_PASSWORD=signflow_password
+      - POSTGRES_DB=signflow
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./frontend/dist:/usr/share/nginx/html:ro
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
